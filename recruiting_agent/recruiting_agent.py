@@ -17,6 +17,7 @@ Install:
 import json
 import os
 import random
+import re
 import uuid
 
 from dotenv import load_dotenv
@@ -127,24 +128,86 @@ def _job_has_required_fields(job):
         job.get("min_years_experience") is not None and bool(job.get("description"))
 
 
+def _missing_required_skills(required_skills, profile_skills):
+    profile_skill_keys = {skill.casefold() for skill in profile_skills}
+    return [skill for skill in required_skills if skill.casefold() not in profile_skill_keys]
+
+
+def _justification_has_false_missing_skill_claim(justification, profile_skills, required_skills):
+    profile_skill_keys = {skill.casefold() for skill in profile_skills}
+    present_required = [skill for skill in required_skills if skill.casefold() in profile_skill_keys]
+    for skill in present_required:
+        escaped_skill = re.escape(skill)
+        if re.search(
+            rf"(?:not missing|not absent|does not lack)[^.?!;\n]{{0,20}}\b{escaped_skill}\b|"
+            rf"\b{escaped_skill}\b[^.?!;\n]{{0,20}}(?:is not missing|is not absent)",
+            justification,
+            flags=re.IGNORECASE,
+        ):
+            continue
+        if re.search(
+            rf"(?:missing|lacks?|without|does not have|doesn't have|no evidence of)"
+            rf"[^.?!;\n]{{0,80}}\b{escaped_skill}\b|"
+            rf"\b{escaped_skill}\b[^.?!;\n]{{0,80}}"
+            rf"(?:is missing|is absent|lacks evidence|is not present)",
+            justification,
+            flags=re.IGNORECASE,
+        ):
+            return True
+    return False
+
+
+def _score_prompt(job_description, candidate_profile, missing_required_skills):
+    user = (
+        "Job description:\n" + json.dumps(job_description, indent=2) +
+        "\n\nCandidate profile:\n" + json.dumps(candidate_profile, indent=2) +
+        "\n\nRequired skills missing from the resolved candidate profile:\n" +
+        json.dumps(missing_required_skills)
+    )
+    return user
+
+
 @tool
 def score_candidate(candidate_profile: dict, job_description: dict | None = None) -> dict:
     "Score a candidate profile against a job description on a 1-100 scale with a justification."
     if job_description is None or not _job_has_required_fields(job_description):
         return {"score": None, "error": "Cannot score without a valid job description."}
-    # Score against the candidate's saved skills of record.
     cid = candidate_profile.get("candidate_id")
-    if cid is not None:
-        candidate_profile = {**candidate_profile, "skills": data_service.fetch_skills(cid)}
-    user = (
-        "Job description:\n" + json.dumps(job_description, indent=2) +
-        "\n\nCandidate profile:\n" + json.dumps(candidate_profile, indent=2)
-    )
-    result = _scoring_llm.invoke([
+    supplied_skills = candidate_profile.get("skills")
+    if supplied_skills:
+        resolved_skills = list(supplied_skills)
+    elif cid is not None:
+        resolved_skills = list(data_service.fetch_skills(cid))
+    else:
+        resolved_skills = []
+    resolved_profile = {**candidate_profile, "skills": resolved_skills}
+    required_skills = job_description["required_skills"]
+    missing_required_skills = _missing_required_skills(required_skills, resolved_skills)
+    user = _score_prompt(job_description, resolved_profile, missing_required_skills)
+    messages = [
         {"role": "system", "content": SCORING_PROMPT},
         {"role": "user", "content": user},
-    ])
-    return result.model_dump()
+    ]
+    result = _scoring_llm.invoke(messages)
+    if not _justification_has_false_missing_skill_claim(
+        result.justification, resolved_skills, required_skills
+    ):
+        return result.model_dump()
+    retry_messages = [
+        {"role": "system", "content": SCORING_PROMPT},
+        {
+            "role": "user",
+            "content": user +
+            "\n\nRegenerate the score. Do not claim any skill is missing unless it "
+            "appears in the explicit missing-skills list above.",
+        },
+    ]
+    regenerated = _scoring_llm.invoke(retry_messages)
+    if _justification_has_false_missing_skill_claim(
+        regenerated.justification, resolved_skills, required_skills
+    ):
+        return {"score": None, "error": "Scoring result contradicts the resolved candidate skills."}
+    return regenerated.model_dump()
 
 
 @tool
