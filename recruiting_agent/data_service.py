@@ -16,7 +16,7 @@ __all__ = [
     "get_job_posting", "get_candidate_record",
     "fetch_work_history", "fetch_education", "fetch_skills",
     "get_profile_from_db", "save_profile_to_db",
-    "get_recruiter",
+    "get_recruiter", "resolve_candidate_record",
 ]
 
 # Built candidate profiles are cached in memory (keyed by candidate_id) so repeat
@@ -34,6 +34,26 @@ def get_job_posting(job_id):
 def get_candidate_record(candidate_id):
     "Return the source candidate record for candidate_id, or None if not found."
     return CANDIDATES.get(candidate_id)
+
+
+def resolve_candidate_record(candidate):
+    "Resolve a candidate payload to one current source record."
+    candidate_id = candidate.get("candidate_id")
+    if candidate_id:
+        return CANDIDATES.get(candidate_id)
+
+    email = (candidate.get("email") or "").strip().lower()
+    if not email:
+        return None
+    matches = [record for record in CANDIDATES.values()
+               if record.get("email", "").strip().lower() == email]
+    if len(matches) == 1:
+        return matches[0]
+    name = (candidate.get("name") or "").strip().casefold()
+    if name:
+        matches = [record for record in matches
+                   if record.get("name", "").strip().casefold() == name]
+    return matches[0] if len(matches) == 1 else None
 
 
 def get_recruiter(recruiter):
