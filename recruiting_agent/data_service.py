@@ -97,7 +97,12 @@ def add_candidate_skill(candidate_id, skill):
     record = CANDIDATES.get(candidate_id)
     if record is None:
         return {"updated": False, "found": False}
-    skills = list(record["skills"])
+    if skill not in record["skills"]:
+        record["skills"].append(skill)
+    cached = _PROFILES.get(candidate_id)
+    if cached is not None:
+        _PROFILES[candidate_id] = {**cached, "skills": list(record["skills"])}
+    skills = fetch_skills(candidate_id)
     if skill not in skills:
-        skills.append(skill)
-    return {"updated": True, "found": True, "skills": skills}
+        return {"updated": False, "found": True, "error": "skill write did not persist"}
+    return {"updated": True, "found": True, "skills": list(skills)}
